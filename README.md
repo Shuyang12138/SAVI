@@ -1,18 +1,16 @@
 # SAVI
-We introduce SAVI, a graph-guided fused lasso framework that integrates spatial context with latent cellular state to infer gene-enhancer interactions from spatial multi-modal data.
+SAVI is a graph-guided fused lasso framework that integrates spatial context with latent cellular state to infer gene-enhancer interactions from spatial multi-modal data.
 
 ## Preparation
 ### Install/load required packages
+For the first step, we can download the code by
 ```bash
-git clone https://github.com/Shuyang12138/SAVI
-```
-
-```R
-install.packages()
+git clone https://github.com/Shuyang12138/SAVI.git
 ```
 ### Input data
+The input data should be an imputed data list `imputation` with one element `imputation$rna` containing the cell-by-gene expression imputation matrix and another element `imputation$atac` containing the cell-by-peak accessibility matrix, a spatial coordinate 
 ```R
-load('/storage10/shuyang/GLEAM_real/AdultMB_multiplex/real_application.Rdata')
+load('AdultMB_multiplex/real_application.Rdata')
 ```
 ## GE identification
 ```R
