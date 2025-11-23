@@ -18,7 +18,7 @@ devtools::install_local("code/myFuser/",force = T)
 source('code/savi.R')
 library(furrr)
 plan(multicore, workers = 10)
-example_gene = names(P22_multipseudoT)
+example_gene = names(P22_multipseudoT)[1:10]
 MB5Matac_result <- fusing_bench_multiveloT(
         sp_num = 6,
         time_num = 5,
