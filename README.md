@@ -8,12 +8,14 @@ For the first step, we can download the code by
 git clone https://github.com/Shuyang12138/SAVI.git
 ```
 ### Input data
-The input data should be an imputed data list `imputation` with one element `imputation$rna` containing the cell-by-gene expression imputation matrix and another element `imputation$atac` containing the cell-by-peak accessibility matrix, a spatial coordinate 
+The input data should be an imputed data list `imputation` with one element `imputation$rna` containing the cell-by-gene expression imputation matrix and another element `imputation$atac` containing the cell-by-peak accessibility matrix, a spatial coordinate matrix containing spatial coordinates of cells and a vector (Monocle3) or list (MultiVelo) of pseudo times for each cell.
 ```R
 load('AdultMB_multiplex/real_application.Rdata')
 ```
 ## GE identification
 ```R
+devtools::install_local("code/myFuser/",force = T)
+source('code/savi.R')
 library(furrr)
 plan(multicore, workers = 10)
 example_gene = names(P22_multipseudoT)
@@ -29,3 +31,8 @@ MB5Matac_result <- fusing_bench_multiveloT(
           intercept=T
       )
 ```
+## Output
+The output includes SAVI inferred gene-enhancer regulatory score for each gene as an element named `fusion`
+
+## Requirement
+R packages: Seurat, Signac, data.table, GenomicRanges
