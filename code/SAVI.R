@@ -303,7 +303,7 @@ names(result) = use_genes
 return(list(coef=result))
 #return(list(initial_setting = list(coef=result,groups=groups,group_all=group_all,group_count=group_count)))
 }
-folder_path <- "code/MultiVeloT/"
+folder_path <- "data/MultiVeloT/"
 
 # List all files ending with _t.csv
 file_list <- list.files(path = folder_path, pattern = "_t\\.csv$", full.names = TRUE)
