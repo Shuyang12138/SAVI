@@ -9,8 +9,8 @@ git clone https://github.com/Shuyang12138/SAVI.git
 ```
 ### Input data
 The input data should be an imputed data list `imputation` with one element `imputation$rna` containing the cell-by-gene expression imputation matrix and another element `imputation$atac` containing the cell-by-peak accessibility matrix, a spatial coordinate matrix containing spatial coordinates of cells and a vector (Monocle3) or list (MultiVelo) of pseudo times for each cell.
-```R
-load('data/real_application.Rdata')
+```bash
+wget https://zenodo.org/records/17695572/files/real_application.Rdata?download=1
 ```
 ## GE identification
 ```R
