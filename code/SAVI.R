@@ -1,13 +1,15 @@
 ################################################################################
-# SAVI.R  --  annotated version (comments only; code is unchanged)
+# SAVI.R  --  annotated version
 #
 # OVERVIEW OF THE THREE MAIN STEPS OF SAVI (all implemented inside
-# `fusing_bench_multiveloT()` below, run once per gene):
+# `fusing_bench()` below; Step 1 is run once, Steps 2-3 once per gene):
 #
 #   STEP 1. Spatiotemporal grouping of cells
 #           Cells are binned on a (x, y, pseudotime) grid into groups; groups
 #           with too few cells are dropped, and a similarity graph (G_simu)
 #           between the remaining groups is built from their grid distances.
+#           The grouping uses ONE pseudotime shared by all genes (e.g. the
+#           ATAC-based pseudotime), so the groups are the same for every gene.
 #
 #   STEP 2. Group-specific peak-gene regression with a fused lasso
 #           Gene expression is regressed on candidate peak accessibility, with
@@ -23,7 +25,7 @@
 #           expression within groups (1000 times) and converted to a one-sided
 #           p-value with `signac_p()`.
 #
-# Sections before the main function are helper functions / data loading.
+# Sections before the main function are helper functions.
 ################################################################################
 
 # ------------------------------------------------------------------------------
@@ -36,6 +38,7 @@ library(dplyr)
 library(data.table)
 library(GenomicRanges)
 library(Matrix)
+library(glmnet)   # within-group elastic-net baseline in Step 2
 
 # ------------------------------------------------------------------------------
 # 0a. Helper: find_peak()
@@ -107,41 +110,39 @@ CollapseToLongestTranscript <- function(ranges) {
   return(gene.ranges)
 }
 
-library(glmnet)  # used for the within-group elastic-net baseline in Step 2
-
 # ------------------------------------------------------------------------------
 # 0c. Helper: gaussian_kernel()
 #     Gaussian distance-decay weights: exp(-d^2 / (2 * bandwidth^2)).
-#     (Used for the geographically weighted correlation below.)
+#     (Only used by the disabled geographically weighted correlation below.)
 # ------------------------------------------------------------------------------
 gaussian_kernel <- function(d, bandwidth) {
-          exp(- (d^2) / (2 * bandwidth^2))
-        }
+  exp(- (d^2) / (2 * bandwidth^2))
+}
 
 # ------------------------------------------------------------------------------
 # 0d. Helper: gw_correlation()
 #     Geographically weighted (local) Pearson correlation between X and Y at
 #     location i, using row i of the weight matrix W.
-#     NOTE: the calls to this function inside `fusing_bench_multiveloT()` are
-#     commented out; the Spearman correlation per group is used instead.
+#     NOTE: the calls to this function inside `fusing_bench()` are commented
+#     out; the Spearman correlation per group is used instead.
 # ------------------------------------------------------------------------------
 gw_correlation <- function(i, X, Y, W) {
-          w <- W[i, ]  # Extract weights for location i
-          w <- w / sum(w)  # Normalize weights
-          
-          # Compute weighted means
-          X_mean <- sum(w * X)
-          Y_mean <- sum(w * Y)
-          
-          # Compute weighted covariance and variances
-          cov_xy <- sum(w * (X - X_mean) * (Y - Y_mean))
-          var_x <- sum(w * (X - X_mean)^2)
-          var_y <- sum(w * (Y - Y_mean)^2)
-          
-          # Compute local correlation
-          r_local <- cov_xy / sqrt(var_x * var_y)
-          return(r_local)
-        }
+  w <- W[i, ]       # Extract weights for location i
+  w <- w / sum(w)   # Normalize weights
+
+  # Compute weighted means
+  X_mean <- sum(w * X)
+  Y_mean <- sum(w * Y)
+
+  # Compute weighted covariance and variances
+  cov_xy <- sum(w * (X - X_mean) * (Y - Y_mean))
+  var_x <- sum(w * (X - X_mean)^2)
+  var_y <- sum(w * (Y - Y_mean)^2)
+
+  # Compute local correlation
+  r_local <- cov_xy / sqrt(var_x * var_y)
+  return(r_local)
+}
 
 # ------------------------------------------------------------------------------
 # 0e. Helper: signac_p()
@@ -153,32 +154,35 @@ gw_correlation <- function(i, X, Y, W) {
 #     of the null, and a one-sided (upper-tail) normal p-value is returned.
 #     Returns: p-value matrix with the same dimensions as `corre`.
 # ------------------------------------------------------------------------------
-signac_p = function(background_corr,corre){
-    # Stack the list of null matrices into a 3D array (peaks x groups x permutations)
-    background_array <- simplify2array(background_corr)
+signac_p = function(background_corr, corre){
+  # Stack the list of null matrices into a 3D array (peaks x groups x permutations)
+  background_array <- simplify2array(background_corr)
 
-# Compute mean and standard deviation across the third dimension (i.e., over the list)
-    mean_mat <- apply(background_array, c(1, 2), mean)
-    sd_mat <- apply(background_array, c(1, 2), sd)
+  # Mean and standard deviation across the third dimension (i.e., over the list)
+  mean_mat <- apply(background_array, c(1, 2), mean)
+  sd_mat <- apply(background_array, c(1, 2), sd)
 
-# Compute Z-score
-    z_score <- (corre - mean_mat) / sd_mat
-    # One-sided p-value: probability of a correlation at least this large under the null
-    pval_mat <- pnorm(z_score, lower.tail = FALSE)
-    return(pval_mat)
+  # Compute Z-score
+  z_score <- (corre - mean_mat) / sd_mat
+  # One-sided p-value: probability of a correlation at least this large under the null
+  pval_mat <- pnorm(z_score, lower.tail = FALSE)
+  return(pval_mat)
 }
 
 # ------------------------------------------------------------------------------
-# 1. MAIN FUNCTION: fusing_bench_multiveloT()
+# 1. MAIN FUNCTION: fusing_bench()
 #    Runs the three SAVI steps for every gene in `use_genes`.
 #
 #    Arguments
-#      sp_num        : number of spatial bins along the x axis (bin size is
-#                      also used for y)
-#      time_num      : number of pseudotime bins
+#      sp_interval   : width of a spatial bin (same width for x and y), in the
+#                      units of `spatial_coord`. E.g. with `num` bins along x:
+#                      (max(x) - min(x)) / num
+#      time_interval : width of a pseudotime bin, e.g.
+#                      (max(pseudoT) - min(pseudoT)) / t_num
 #      spatial_coord : cells x 2 matrix/data.frame of spatial coordinates
-#      pseudoT       : list (one element per gene) of pseudotime estimates
-#                      (e.g. MultiVelo); element i must contain `$x`
+#      pseudoT       : numeric vector, one pseudotime value per cell (same cell
+#                      order as `spatial_coord`). The SAME pseudotime is used
+#                      for every gene, so the grouping is shared by all genes.
 #      use_peaks     : list (one element per gene) of candidate peak names
 #      use_genes     : vector of gene names to analyse
 #      imputation    : list with imputed matrices `$rna` (cells x genes) and
@@ -186,30 +190,28 @@ signac_p = function(background_corr,corre){
 #      cell_types    : vector of cell-type labels (one per cell)
 #      intercept     : whether to fit an intercept (default FALSE)
 #
-#    Returns: list(coef = <named list, one entry per gene>) where each entry
-#             holds the fused lasso fits, within-group lasso, marginal
-#             correlation + p-values and the grouping information.
+#    Returns: list(coef, groups, group_all, group_count)
+#      coef        : named list (one entry per gene) with the fused lasso fits,
+#                    within-group lasso, marginal correlation + p-values
+#      groups      : integer group ID of every retained cell (shared by genes)
+#      group_all   : group label of EVERY cell (incl. cells in dropped groups)
+#      group_count : retained groups, their (x, y, t) bin indices and cell counts
 #
-#    NOTE (from original author): group_all = group_x must be created earlier.
-#    Requires furrr/future (future_map, furrr_options), the custom `myFuser`
-#    package (fusedLassoProximal), and dplyr to be available.
+#    Requires furrr/future (future_map, furrr_options), glmnet, the custom
+#    `myFuser` package (fusedLassoProximal), and dplyr to be available.
+#    Call `future::plan(multisession, workers = n)` beforehand to run genes
+#    in parallel (the default plan runs them sequentially).
 # ------------------------------------------------------------------------------
-fusing_bench_multiveloT = function(sp_num,time_num,spatial_coord,pseudoT,use_peaks,use_genes,imputation,cell_types,intercept=F){# need to make group_all = group_x much ealier!!!!!!!!!!!!!!!!
+fusing_bench = function(sp_interval,time_interval,spatial_coord,pseudoT,use_peaks,use_genes,imputation,cell_types,intercept=F){
 set.seed(2025, kind = "L'Ecuyer-CMRG")  # reproducible random numbers across parallel workers
-tryCatch({
-    # Loop over genes in parallel; each iteration handles one gene
-    result = future_map(1:length(use_genes),function(i){
 
 ################################################################################
 # STEP 1: Spatiotemporal grouping of cells + group similarity graph
+#         (gene-independent: computed once, outside the gene loop)
 ################################################################################
-# Combine spatial coordinates with the gene-specific pseudotime
+# Combine spatial coordinates with the (global) pseudotime
 grid = data.frame(spatial_coord)
-grid$t = pseudoT[[i]]$x
-        # Bin widths: the x range divided by the number of spatial bins (also
-        # applied to y), and the pseudotime range divided by the number of time bins
-        sp_interval <- (max(grid[,1]) - min(grid[,1])) / sp_num
-      time_interval <- (max(grid$t) - min(grid$t)) / time_num
+grid$t = pseudoT
 # Integer bin index of every cell along x, y and pseudotime
 cell_x_simu = floor((grid[,1]-min(grid[,1]))/sp_interval)
 cell_y_simu = floor((grid[,2]-min(grid[,2]))/sp_interval)
@@ -238,8 +240,9 @@ G_simu = exp(-group_dist^2)
 G_simu[G_simu<exp(-1)] = 0
 diag(G_simu) = 0
 
-
-        # Your existing function logic
+# Loop over genes (in parallel if a future plan is set); each iteration handles one gene
+result = future_map(1:length(use_genes),function(i){
+tryCatch({
         # Response (gene expression) and predictors (peak accessibility)
         y_simu = imputation$rna[, use_genes[i]]
         X_simu = imputation$atac[, use_peaks[[i]]]
@@ -252,7 +255,7 @@ diag(G_simu) = 0
         y_simu = y_simu[is.element(group_x$group, group_count$group)]
         # Add tiny noise to break ties / avoid constant expression within groups
         y_simu = y_simu+rnorm(n = length(y_simu),mean=0,sd = 1e-3)
-    cell_types =  cell_types[is.element(group_x$group, group_count$group)]
+        cell_types =  cell_types[is.element(group_x$group, group_count$group)]
         group_x = group_x[is.element(group_x$group, group_count$group), ]
 
         # Integer group ID for every retained cell
@@ -349,11 +352,10 @@ diag(G_simu) = 0
 # 2c. Evaluate every (lambda, gamma) combination on the grid
 param_grid <- expand.grid(lam = lambda_seq, gam = gamma_seq)
 
-
 param_list <- split(param_grid, seq(nrow(param_grid)))
 
-# Run in parallel using future_map
-# (currently run sequentially with lapply)
+# (Run sequentially with lapply: the gene loop is already parallel, so
+#  parallelising here as well would oversubscribe the workers.)
 cv_results <- lapply(
   param_list,
   function(params) suppressWarnings(process_combination_cv_grouped(params))
@@ -387,17 +389,18 @@ beta_estimate_final <- myFuser::fusedLassoProximal(
                 y_group = y_simu[groups==g]
                 if(length(y_group)>3){
                 cv_model = cv.glmnet(x_group, y_group, alpha = 0.5,nfolds = 5)
-                best_lambda <- cv_model$lambda.min
+                # NOTE: named `glmnet_lambda` (not `best_lambda`) so it does not
+                # overwrite the fused-lasso lambda reported in `fusion_cv`.
+                glmnet_lambda <- cv_model$lambda.min
                     }
             else{
-                best_lambda = 0.002
+                glmnet_lambda = 0.002
             }
-                lasso_withingroup = glmnet(x_group, y_group, alpha = 0.5,lambda = best_lambda,intercept = intercept)
+                lasso_withingroup = glmnet(x_group, y_group, alpha = 0.5,lambda = glmnet_lambda,intercept = intercept)
                 # Column-bind coefficients: one column per group
                 all_group_result = cbind(all_group_result,coef(lasso_withingroup))
         }
 
-        
         ########################################################
         # STEP 3: Group-wise marginal correlation + permutation p-values
         ########################################################
@@ -424,13 +427,6 @@ beta_estimate_final <- myFuser::fusedLassoProximal(
     Y[groups==i] = sample(Y[groups==i],size = sum(groups==i))
 
     }
-            #all_peak_cor = lapply(1:ncol(X_simu),function(j){
-        #local_correlations <- sapply(1:length(Y), FUN=function(k) gw_correlation(k, X_simu[,j], Y, W))
-        
-        #return(local_correlations)
-#})
-        #all_peak_cor = do.call('rbind',all_peak_cor)
-        #group_means <- sapply(colnames(beta.estimate_simu), function(g) rowMeans(all_peak_cor[, groups == g, drop = FALSE],na.rm = T))
         group_means <- sapply(colnames(beta.estimate_simu), function(g) as.vector(cor(X_simu[groups==g,],Y[groups==g],method = 'spearman')))
         rownames(group_means) = colnames(X_simu)
         return(group_means)
@@ -438,14 +434,6 @@ beta_estimate_final <- myFuser::fusedLassoProximal(
         # Convert observed correlations to one-sided p-values against the null
         gwc_p = signac_p(null_means,group_means)
 
-        # Bookkeeping: keep the group labels for all retained cells
-        group_all = group_x
-        group_x = group_x[is.element(group_x$group, group_count$group), ]
-
-        groups = level[group_x$group]
-        names(groups) = NULL
-        # cell type-specific GWC and spearman correlation 
-            
         # Per-gene output:
         #   fusion_old : fused lasso fit with fixed lambda/gamma (Step 2a)
         #   lasso      : within-group elastic-net coefficients (Step 2 baseline)
@@ -453,7 +441,6 @@ beta_estimate_final <- myFuser::fusedLassoProximal(
         #   marginal_p : permutation-based p-values for `marginal` (Step 3)
         #   fusion     : final CV-tuned fused lasso coefficients (Step 2d)
         #   fusion_cv  : selected lambda/gamma and the full CV grid results
-        #   groups / group_all / group_count : grouping information (Step 1)
         return(list(fusion_old=beta.estimate_simu,
                     lasso=all_group_result,
                     marginal = group_means,
@@ -462,39 +449,25 @@ beta_estimate_final <- myFuser::fusedLassoProximal(
                     fusion_cv = list(lambda = best_lambda,  
                                      gamma = best_gamma,  
                                      cv_df = cv_df
-                                    ),
-                    groups = groups,
-                    group_all = group_all,
-                    group_count = group_count
+                                    )
                    )
               )
-    }, .options = furrr_options(seed = TRUE))  # seed = TRUE: parallel-safe RNG
-                              
-},error = function(e) {
-        # On failure, write the error message to a log file and return NULL
-        cat(sprintf(e$message), file='fuser_multivelo_error.log')
-        return(NULL)  # Return NULL if an error occurs
+    }, error = function(e) {
+        # On failure, log the gene and the error message (appended) and return NULL for this gene
+        cat(sprintf("Error in iteration %d (%s): %s\n", i, use_genes[i], e$message),
+            file='fuser_region_error.log', append = TRUE)
+        return(NULL)
     })
-names(result) = use_genes
-    
+},.options = furrr_options(seed = TRUE))  # seed = TRUE: parallel-safe RNG
 names(result) = use_genes
 
-return(list(coef=result))
-#return(list(initial_setting = list(coef=result,groups=groups,group_all=group_all,group_count=group_count)))
+# Grouping information shared by all genes:
+#   group_all   = group label of every cell (before dropping small groups)
+#   groups      = integer group ID of every retained cell
+group_all = group_x
+group_x = group_x[is.element(group_x$group, group_count$group), ]
+groups = level[group_x$group]
+names(groups) = NULL
+
+return(list(coef=result,groups=groups,group_all=group_all,group_count=group_count))
 }
-
-# ------------------------------------------------------------------------------
-# 2. Load pseudotime inputs (MultiVelo-derived, one CSV per gene)
-#    Reads every "<gene>_t.csv" file in data/MultiVeloT/ into a named list
-#    (names = gene names, "_t" suffix removed). This list is the `pseudoT`
-#    argument of fusing_bench_multiveloT().
-# ------------------------------------------------------------------------------
-folder_path <- "data/MultiVeloT/"
-
-# List all files ending with _t.csv
-file_list <- list.files(path = folder_path, pattern = "_t\\.csv$", full.names = TRUE)
-
-# Read all files into a list
-P22_multipseudoT <- lapply(file_list, read.csv)
-names(P22_multipseudoT) <- tools::file_path_sans_ext(basename(file_list))
-names(P22_multipseudoT) <- sub("_t$", "", names(P22_multipseudoT))
