@@ -33,7 +33,7 @@ Seurat objects ──► SAVI_data_prep.R ──► GLEAM_impute.py ──► SA
 
 **R** (4.x)
 - Data preparation: `Seurat` (>= 5), `Signac`, `GenomicRanges`, `Matrix`, `data.table`
-- SAVI: `dplyr`, `glmnet`, `future`, `furrr`, and **`myFuser`** (provides `fusedLassoProximal`, the fused-lasso solver)
+- SAVI: `dplyr`, `glmnet`, `future`, `furrr`, and **`myFuser`** (provides `fusedLassoProximal`, the fused-lasso solver). Install with `devtools::install_local("code/myFuser/",force = T)`
 - Evaluation: `ggplot2`; `pROC` and `PRROC` (AUROC / AUPR); `IRanges` and `GenomicRanges` (gene–CRE overlaps)
 - Only for the Signac / Cicero baselines: `cicero` and `monocle3`
 
